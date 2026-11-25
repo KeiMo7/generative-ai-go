@@ -62,6 +62,12 @@ func (c *Client) CreateCachedContent(ctx context.Context, cc *CachedContent) (*C
 	if cc.Name != "" {
 		return nil, errors.New("genai.CreateCachedContent: do not provide a name; one will be generated")
 	}
+	// Cache creation shares the same multimodal assembly pipeline: its
+	// contents, system instruction and tools are validated before anything
+	// is serialized or sent.
+	if _, err := c.validateMultimodalInput(cc.SystemInstruction, cc.Contents, cc.Tools); err != nil {
+		return nil, err
+	}
 	pcc := cc.toProto()
 	pcc.Model = Ptr(fullModelName(cc.Model))
 	req := &pb.CreateCachedContentRequest{

@@ -719,6 +719,14 @@ const (
 	FileStateActive FileState = 2
 	// FileStateFailed means file failed processing.
 	FileStateFailed FileState = 10
+	// FileStateExpired means the file's expiration time has passed and it
+	// can no longer be referenced. It is a client-side lifecycle state used
+	// by the input assembly pipeline; the service represents expiry by
+	// removing the file.
+	FileStateExpired FileState = 11
+	// FileStateDeleted means the file has been deleted locally. It is a
+	// client-side lifecycle state used by the input assembly pipeline.
+	FileStateDeleted FileState = 12
 )
 
 var namesForFileState = map[FileState]string{
@@ -726,6 +734,8 @@ var namesForFileState = map[FileState]string{
 	FileStateProcessing:  "FileStateProcessing",
 	FileStateActive:      "FileStateActive",
 	FileStateFailed:      "FileStateFailed",
+	FileStateExpired:     "FileStateExpired",
+	FileStateDeleted:     "FileStateDeleted",
 }
 
 func (v FileState) String() string {

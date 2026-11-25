@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	gl "cloud.google.com/go/ai/generativelanguage/apiv1beta"
 	pb "cloud.google.com/go/ai/generativelanguage/apiv1beta/generativelanguagepb"
@@ -105,15 +106,38 @@ func (c *Client) GetFile(ctx context.Context, name string) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return (File{}).fromProto(pf), nil
+	f := (File{}).fromProto(pf)
+	c.rememberFile(withLifecycleState(f))
+	return f, nil
 }
 
 // DeleteFile deletes the file with the given name.
-// It is an error to delete a file that does not exist.
 func (c *Client) DeleteFile(ctx context.Context, name string) error {
-	req := &pb.DeleteFileRequest{Name: userNameToServiceName(name)}
+	serviceName := userNameToServiceName(name)
+	req := &pb.DeleteFileRequest{Name: serviceName}
 	debugPrint(req)
-	return c.fc.DeleteFile(ctx, req)
+	if err := c.fc.DeleteFile(ctx, req); err != nil {
+		return err
+	}
+	// Mark the local record deleted so a later reference is rejected at
+	// assembly time instead of being treated as unknown.
+	if c.files != nil {
+		c.files.delete(serviceName)
+	}
+	return nil
+}
+
+// withLifecycleState translates a file's expiration time into the
+// client-side [FileStateExpired] state so the assembly pipeline can reject
+// expired references before they reach the service.
+func withLifecycleState(f *File) *File {
+	if f == nil {
+		return nil
+	}
+	if f.State == FileStateActive && !f.ExpirationTime.IsZero() && time.Now().After(f.ExpirationTime) {
+		f.State = FileStateExpired
+	}
+	return f
 }
 
 // userNameToServiceName converts a name supplied by the user to a name required by the service.
@@ -127,12 +151,14 @@ func userNameToServiceName(name string) string {
 // ListFiles returns an iterator over the uploaded files.
 func (c *Client) ListFiles(ctx context.Context) *FileIterator {
 	return &FileIterator{
+		c:  c,
 		it: c.fc.ListFiles(ctx, &pb.ListFilesRequest{}),
 	}
 }
 
 // A FileIterator iterates over Files.
 type FileIterator struct {
+	c  *Client
 	it *gl.FileIterator
 }
 
@@ -143,7 +169,9 @@ func (it *FileIterator) Next() (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return (File{}).fromProto(m), nil
+	f := (File{}).fromProto(m)
+	it.c.rememberFile(withLifecycleState(f))
+	return f, nil
 }
 
 // PageInfo supports pagination. See the google.golang.org/api/iterator package for details.

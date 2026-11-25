@@ -54,7 +54,14 @@ func (m *EmbeddingModel) EmbedContent(ctx context.Context, parts ...Part) (*Embe
 // If the given title is non-empty, it is passed to the model and
 // the task type is set to TaskTypeRetrievalDocument.
 func (m *EmbeddingModel) EmbedContentWithTitle(ctx context.Context, title string, parts ...Part) (*EmbedContentResponse, error) {
-	req := newEmbedContentRequest(m.fullName, m.TaskType, title, parts)
+	content := NewUserContent(parts...)
+	// Embeddings go through the same multimodal assembly pipeline as every
+	// other entry point. Inline MIME inference writes the effective type
+	// back onto the content before serialization.
+	if _, err := m.c.validateMultimodalInput(nil, []*Content{content}, nil); err != nil {
+		return nil, err
+	}
+	req := newEmbedContentRequest(m.fullName, m.TaskType, title, content.Parts)
 	res, err := m.c.gc.EmbedContent(ctx, req)
 	if err != nil {
 		return nil, err
@@ -82,8 +89,19 @@ func newEmbedContentRequest(model string, tt TaskType, title string, parts []Par
 
 // An EmbeddingBatch holds a collection of embedding requests.
 type EmbeddingBatch struct {
-	tt  TaskType
-	req *pb.BatchEmbedContentsRequest
+	c        *Client
+	tt       TaskType
+	fullName string
+	// entries retains each batched request as veneer types so the shared
+	// assembly pipeline can validate (and write inferred MIME types back)
+	// before any proto is built or request is sent.
+	entries []embedBatchEntry
+}
+
+// embedBatchEntry is one not-yet-serialized batched embedding request.
+type embedBatchEntry struct {
+	title   string
+	content *Content
 }
 
 // NewBatch returns a new, empty EmbeddingBatch with the same TaskType as the model.
@@ -92,10 +110,9 @@ type EmbeddingBatch struct {
 // all the embeddings in a single call to the model.
 func (m *EmbeddingModel) NewBatch() *EmbeddingBatch {
 	return &EmbeddingBatch{
-		tt: m.TaskType,
-		req: &pb.BatchEmbedContentsRequest{
-			Model: m.fullName,
-		},
+		c:        m.c,
+		tt:       m.TaskType,
+		fullName: m.fullName,
 	}
 }
 
@@ -107,13 +124,39 @@ func (b *EmbeddingBatch) AddContent(parts ...Part) *EmbeddingBatch {
 
 // AddContent adds a content to the batch with a title.
 func (b *EmbeddingBatch) AddContentWithTitle(title string, parts ...Part) *EmbeddingBatch {
-	b.req.Requests = append(b.req.Requests, newEmbedContentRequest(b.req.Model, b.tt, title, parts))
+	b.entries = append(b.entries, embedBatchEntry{
+		title:   title,
+		content: NewUserContent(parts...),
+	})
 	return b
+}
+
+// toProto builds the wire request from the validated veneer entries. It is
+// called only after the shared assembly pipeline has accepted every entry,
+// so inferred inline MIME types are already present.
+func (b *EmbeddingBatch) toProto() *pb.BatchEmbedContentsRequest {
+	req := &pb.BatchEmbedContentsRequest{Model: b.fullName}
+	for _, e := range b.entries {
+		req.Requests = append(req.Requests,
+			newEmbedContentRequest(b.fullName, b.tt, e.title, e.content.Parts))
+	}
+	return req
 }
 
 // BatchEmbedContents returns the embeddings for all the contents in the batch.
 func (m *EmbeddingModel) BatchEmbedContents(ctx context.Context, b *EmbeddingBatch) (*BatchEmbedContentsResponse, error) {
-	res, err := m.c.gc.BatchEmbedContents(ctx, b.req)
+	contents := make([]*Content, len(b.entries))
+	for i, e := range b.entries {
+		contents[i] = e.content
+	}
+	// Validate every batched content through the shared pipeline before any
+	// network call. If a single entry is invalid, nothing is sent.
+	if b.c != nil {
+		if _, err := b.c.validateMultimodalInput(nil, contents, nil); err != nil {
+			return nil, err
+		}
+	}
+	res, err := m.c.gc.BatchEmbedContents(ctx, b.toProto())
 	if err != nil {
 		return nil, err
 	}

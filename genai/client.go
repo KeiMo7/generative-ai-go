@@ -45,6 +45,9 @@ type Client struct {
 	fc *gl.FileClient
 	cc *gl.CacheClient
 	ds *gld.Service
+	// files caches uploaded-file metadata so the input assembly pipeline
+	// can validate references locally, without a network round trip.
+	files *fileRegistry
 }
 
 // NewClient creates a new Google generative AI client.
@@ -96,7 +99,7 @@ Import the option package as "google.golang.org/api/option".`)
 	mc.SetGoogleClientInfo(kvs...)
 	fc.SetGoogleClientInfo(kvs...)
 
-	return &Client{gc, mc, fc, cc, ds}, nil
+	return &Client{gc, mc, fc, cc, ds, newFileRegistry()}, nil
 }
 
 // hasAuthOption reports whether an authentication-related option was provided.
@@ -157,6 +160,11 @@ type GenerativeModel struct {
 	// The name of the CachedContent to use.
 	// Must have already been created with [Client.CreateCachedContent].
 	CachedContentName string
+
+	// lastReport holds the observation summary of the most recent input
+	// assembly pass. It is exposed via LastInputReport and never contains
+	// raw bytes.
+	lastReport *InputReport
 }
 
 // GenerativeModel creates a new instance of the named generative model.
@@ -221,6 +229,14 @@ func (m *GenerativeModel) generateContent(ctx context.Context, req *pb.GenerateC
 }
 
 func (m *GenerativeModel) newGenerateContentRequest(contents ...*Content) (*pb.GenerateContentRequest, error) {
+	// Run the shared multimodal assembly pipeline before serializing so
+	// that inline bytes and file references are recognized, metered and
+	// rejected with identical rules, and so an inferred MIME type is
+	// written back onto inline blobs. A rejected request never reaches
+	// serialization, so no partial request can be sent.
+	if err := m.validateModelInput(contents); err != nil {
+		return nil, err
+	}
 	return pvCatchPanic(func() *pb.GenerateContentRequest {
 		var cc *string
 		if m.CachedContentName != "" {
